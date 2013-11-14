@@ -77,7 +77,7 @@ data Machine = Machine { rpc :: Int16,  -- ^ next instruction to execute
   instructions.
 -}
 
-run :: RWS [Int16] [Int16] Machine ()
+run :: RWS [Int16] [String] Machine ()
 run = do
   machine'@(Machine rpc rtp rbp imem dmem smem) <- get
   let machine = debug machine'
@@ -193,13 +193,24 @@ run = do
           put $ machine { rpc = (smem ! (rtp-1)), rtp = rtp - 1 }
           run
 
+        Instructions.Read   -> do
+          (i:rest) <- ask
+          put $ machine { rpc = rpc + 1, rtp = rtp + 1,
+                          smem = (smem // [(rtp, i)]) }
+          local tail run
+
+        Instructions.Write  -> do
+          tell $ [show $ smem ! (rtp-1)]
+          put $ machine { rpc = rpc + 1, rtp = rtp - 1 }
+          run
+
         Instructions.Leave  -> do
           {-
-            When we're leaving a procedure, we have to reset rbp and rtp to
-            the values they had in the calling context. Our calling
-            convention is that we store the return address at the bottom of
-            the stack frame (at rbp), and the old base pointer in the dynamic
-            link field (at rbp+3).
+            When we're leaving a procedure, we have to reset rbp to the
+            value it had in the calling context. Our calling convention is
+            that we store the return address at the bottom of the stack
+            frame (at rbp), and the old base pointer in the dynamic link
+            field (at rbp+3).
 
             We reset rbp to whatever the value of the dynamic link field is.
             Since we created the stack frame for this procedure, the one
@@ -212,17 +223,6 @@ run = do
             the dynamic link, static link, and lexical level delta fields).
           -}
           put $ machine { rpc = rpc + 1, rtp = rbp+1, rbp = (smem ! (rbp+3)) }
-          run
-
-        Instructions.Read   -> do
-          (i:rest) <- ask
-          put $ machine { rpc = rpc + 1, rtp = rtp + 1,
-                          smem = (smem // [(rtp, i)]) }
-          local tail run
-
-        Instructions.Write  -> do
-          tell $ [smem ! (rtp-1)]
-          put $ machine { rpc = rpc + 1, rtp = rtp - 1 }
           run
 
     Instructions.Unary i a ->
@@ -264,25 +264,21 @@ run = do
             called) needs to go on the top of stack, as specified by our
             calling convention.
 
-            The static link (the base pointer of the stack frame where this
-            procedure was *defined*) should be just under top of stack. If
-            we are calling a procedure which is defined in the same scope,
-            then the static link is just a copy of whatever the current
-            static link is. However, if that isn't the case, then we need to
-            call followChain to find out what the base pointer was in the
-            stack frame where the procedure we're entering was defined.
+            The static link (the base pointer of the stack frame belonging
+            to the *enclosing* procedure (the one where this procedure was
+            defined, and we should have access to the local variables)
+            should be placed at rbp+2. If we are calling a procedure
+            which is defined in the same scope, then the static link is just
+            a copy of whatever the current static link is. However, if that
+            isn't the case, then we need to call followChain to find out
+            what the base pointer was in the stack frame where the procedure
+            we're entering was defined.
           -}
-          if (smem ! (rtp-1)) == 0 then do
-            --calling a procedure at the same level, so we share the stack frame
-            put $ machine { rpc = rpc + 1, rtp = rtp+a+2, rbp = rtp-2,
-                            smem = (smem // [(rtp, rbp+2), (rtp+1, rbp)]) }
-            run
-          else do
-            let staticLink = followChain 1 (smem ! (rtp-1)) rbp smem
-            put $ machine { rpc = rpc + 1, rtp = rtp+a+2, rbp = rtp-2,
-                            smem = (smem // [(rtp, staticLink), (rtp+1, rbp)]) }
-            run
-
+          let lexicalLevelDelta = (smem ! (rtp-1))
+          let staticLink = (followChain 0 lexicalLevelDelta rbp smem)
+          put $ machine { rpc = rpc + 1, rtp = rtp+a+2, rbp = rtp-2,
+                          smem = (smem // [(rtp, staticLink), (rtp+1, rbp)]) }
+          run
 
         Instructions.Jmp  -> do
           put $ machine { rpc = a }
@@ -304,17 +300,18 @@ run = do
             Load gets a variable from a calling frame onto the top of the
             stack. We follow the chain of links to find the stack frame the
             variable is in, add b (the address of the variable in that
-            frame) and add one, because each frame has the dynamic link stored
-            just before the start of the real stack variables, after the static
-            link, whose address we get from followChain.
+            frame) and add two, because each frame has the dynamic link and
+            static link stored just before the start of the real stack
+            variables, but it's the static link whose address we get from
+            followChain.
           -}
-          let loadAddr = (followChain 0 a rbp smem) + b + 1
+          let loadAddr = (followChain 0 a rbp smem) + 4 + b
           put $ machine { rpc = rpc + 1, rtp = rtp + 1,
                           smem = (smem // [(rtp, (smem ! loadAddr))]) }
           run
 
         Instructions.Sto    -> do --Store updates a variable in a calling frame
-          let storeAddr = (followChain 0 a rbp smem) + b + 1
+          let storeAddr = (followChain 0 a rbp smem) + 4 + b
           put $ machine { rpc = rpc + 1, rtp = rtp - 1,
                           smem = (smem // [(storeAddr, (smem ! (rtp-1)))]) }
           run
@@ -328,7 +325,7 @@ run = do
             level delta at (rtp - 1) and the return address at (rtp - 2).
           -}
           put $ machine { rpc = b, rtp = rtp + 2,
-                          smem = (smem // [(rtp, rpc+1), (rtp+1, a)]) }
+                          smem = (smem // [(rtp, (rpc+1)), (rtp+1, a)]) }
           run
 
 {-
@@ -343,5 +340,5 @@ run = do
 followChain :: Int16 -> Int16 -> Int16 -> (Array Int16 Int16) -> Int16
 followChain limit n rbp smem =
   if n > limit then
-    followChain limit (n-1) (smem ! (rbp+1)) smem
+    followChain limit (n-1) (smem ! (rbp+2)) smem
   else rbp

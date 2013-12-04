@@ -32,7 +32,6 @@ parseInstruction lineNumber text =
     ["Lss"]         -> Right $ I.Nullary I.Lss
     ["Gtr"]         -> Right $ I.Nullary I.Gtr
     ["Neg"]         -> Right $ I.Nullary I.Neg
-          
     ["Load", a, b]  ->
       let a' = B.readInteger a
           b' = B.readInteger b
